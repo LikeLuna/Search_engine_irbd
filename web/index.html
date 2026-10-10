@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocSearch: a search engine for documents</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="hero">
+    <h1>Doc<span>Search</span></h1>
+    <p id="tagline">Loading index…</p>
+  </header>
+
+  <main>
+    <form id="search-form" autocomplete="off" role="search">
+      <div class="searchbox">
+        <input id="q" type="search" placeholder="Search documents…"
+               aria-label="Search query" autofocus>
+        <button type="submit">Search</button>
+      </div>
+      <fieldset class="models">
+        <legend class="sr-only">Ranking model</legend>
+        <label><input type="radio" name="model" value="bm25" checked><span>BM25</span></label>
+        <label><input type="radio" name="model" value="tfidf"><span>TF-IDF</span></label>
+        <label><input type="radio" name="model" value="boolean"><span>Boolean</span></label>
+      </fieldset>
+      <p id="hint" class="hint"></p>
+    </form>
+
+    <div id="examples" class="chips"></div>
+    <div id="status" class="status" aria-live="polite"></div>
+    <div id="filters" class="chips"></div>
+    <ul id="results" class="results"></ul>
+    <button id="more" class="more" hidden>Show more</button>
+  </main>
+
+  <footer>Information Retrieval and Big Data minor project · inverted index built with Apache Spark</footer>
+
+  <script src="search.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

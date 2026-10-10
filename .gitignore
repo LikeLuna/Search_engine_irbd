@@ -20,4 +20,4 @@ firebase-debug.log
 # OS / editor
 .DS_Store
 .vscode/
-node_modules/
+node_modules/web/data/
