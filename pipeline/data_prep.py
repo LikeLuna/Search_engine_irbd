@@ -14,7 +14,7 @@ CACHE = Path("data/raw")
 
 TOPICS = {
     "machine learning": "machine learning",
-    "databases": "database management system",
+    "databases": "relational database SQL query",
     "distributed computing": "distributed computing",
     "information retrieval": "information retrieval search engine",
     "computer networks": "computer network protocol",
