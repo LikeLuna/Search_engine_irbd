@@ -21,3 +21,5 @@ firebase-debug.log
 .DS_Store
 .vscode/
 node_modules/web/data/
+
+web/data/
