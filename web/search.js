@@ -11,14 +11,41 @@
   }
   const rankSort = (arr) => arr.sort((a, b) => b[1] - a[1] || a[0] - b[0]);
 
+  // Damerau-Levenshtein (adjacent swaps count as one edit). Returns a value
+  // greater than `max` as soon as the distance is known to exceed it.
+  function editDistance(a, b, max) {
+    const la = a.length, lb = b.length;
+    if (Math.abs(la - lb) > max) return max + 1;
+    let prev2 = null;
+    let prev = Array.from({ length: lb + 1 }, (_, j) => j);
+    for (let i = 1; i <= la; i++) {
+      const cur = [i];
+      let rowMin = i;
+      for (let j = 1; j <= lb; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        let v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+          v = Math.min(v, prev2[j - 2] + 1);
+        }
+        cur.push(v);
+        if (v < rowMin) rowMin = v;
+      }
+      if (rowMin > max) return max + 1;
+      prev2 = prev;
+      prev = cur;
+    }
+    return prev[lb];
+  }
+
   function Engine(index, docs, lang) {
     this.N = index.N;
     this.avgdl = index.avgdl;
     this.docLen = index.docLen;
-    this.terms = new Map(Object.entries(index.terms));   // Map: safe for any word
+    this.terms = new Map(Object.entries(index.terms));
     this.docs = docs;
     this.stems = new Map(Object.entries(lang.stems));
     this.stop = new Set(lang.stop);
+    this.vocab = lang.vocab || [];            // [[word, df], ...] sorted by df desc
     this.norms = this._norms();
   }
 
@@ -34,15 +61,12 @@
     return sq.map(Math.sqrt);
   };
 
-  // same filters as text_processing.preprocess (minus stemming)
   Engine.prototype.keep = function (w) {
     if (w.length < 2 || w.length > 30) return false;
     if (/^\d+$/.test(w) && w.length > 4) return false;
     return !this.stop.has(w);
   };
 
-  // raw word -> index term, or null if the word is not in the index.
-  // Words unseen in the corpus get a light suffix-stripping fallback.
   Engine.prototype.resolve = function (w) {
     const direct = this.stems.get(w) || w;
     if (this.terms.has(direct)) return direct;
@@ -105,7 +129,6 @@
     return rankSort(out);
   };
 
-  // AND, OR, NOT (uppercase), brackets, implicit AND. NOT > AND > OR.
   Engine.prototype.boolean = function (query) {
     const self = this;
     const toks = query.match(/\(|\)|[A-Za-z0-9]+/g) || [];
@@ -164,5 +187,67 @@
     return result ? Array.from(result).sort((a, b) => a - b) : [];
   };
 
-  return { Engine, tokenize };
+  /* ---------------- Task 9 extras ---------------- */
+
+  // Autocomplete: most frequent vocabulary words that start with the prefix.
+  Engine.prototype.suggest = function (prefix, n) {
+    const p = prefix.toLowerCase();
+    const out = [];
+    if (p.length < 2) return out;
+    for (const [w] of this.vocab) {
+      if (w !== p && w.startsWith(p)) {
+        out.push(w);
+        if (out.length >= n) break;
+      }
+    }
+    return out;
+  };
+
+  // Spelling: closest vocabulary word within 1 edit (short words) or 2 edits.
+  // The vocabulary is sorted by frequency, so on equal distance the more
+  // common word wins.
+  Engine.prototype.correct = function (word) {
+    if (word.length < 3 || !/^[a-z]+$/.test(word)) return null;
+    const maxD = word.length <= 4 ? 1 : 2;
+    let best = null, bestD = maxD + 1;
+    for (const [w] of this.vocab) {
+      if (w === word || Math.abs(w.length - word.length) > maxD) continue;
+      const d = editDistance(word, w, maxD);
+      if (d < bestD) { bestD = d; best = w; }
+    }
+    return best;
+  };
+
+  // Rewrites unknown words in a query; returns null when nothing changed.
+  Engine.prototype.fixQuery = function (query, booleanMode) {
+    const changes = [];
+    const text = query.replace(/[A-Za-z0-9]+/g, (w) => {
+      if (booleanMode && (w === "AND" || w === "OR" || w === "NOT")) return w;
+      const lw = w.toLowerCase();
+      if (!this.keep(lw) || this.resolve(lw) !== null) return w;
+      const fix = this.correct(lw);
+      if (!fix) return w;
+      changes.push([w, fix]);
+      return fix;
+    });
+    return changes.length ? { text, changes } : null;
+  };
+
+  // Runs all three models on one query for the side-by-side view.
+  Engine.prototype.compare = function (query, k) {
+    const bm25 = this.bm25(query), tfidf = this.tfidf(query);
+    const bool = this.boolean(query);
+    const rank = (arr) => new Map(arr.map(([id], i) => [id, i + 1]));
+    const top1 = bm25.slice(0, k), top2 = tfidf.slice(0, k);
+    const inTop2 = new Set(top2.map(([id]) => id));
+    return {
+      total: bm25.length,
+      bm25: top1, tfidf: top2,
+      boolean: bool, boolTop: bool.slice(0, k),
+      rankBm25: rank(bm25), rankTfidf: rank(tfidf),
+      shared: top1.filter(([id]) => inTop2.has(id)).length,
+    };
+  };
+
+  return { Engine, tokenize, editDistance };
 });

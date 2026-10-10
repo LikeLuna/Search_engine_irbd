@@ -1,10 +1,12 @@
 (function () {
   "use strict";
   const PAGE = 10;
+  const MODELS = ["bm25", "tfidf", "boolean", "compare"];
   const HINTS = {
     bm25: "BM25: rewards rare query words, limits repeated words, adjusts for document length.",
     tfidf: "TF-IDF: documents and query as weighted vectors, ranked by cosine similarity.",
     boolean: "Boolean: exact matching with AND, OR, NOT and brackets (operators in capitals). Results are unranked.",
+    compare: "Compare: the same query run through all three models, side by side.",
   };
   const EXAMPLES = {
     ranked: ["distributed file system", "quantum mechanics", "database transaction",
@@ -13,13 +15,33 @@
               "cricket OR football"],
   };
   const $ = (id) => document.getElementById(id);
+
+  // create containers that an older index.html may be missing
+  function ensure(id, cls, before) {
+    let el = $(id);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = id;
+      if (cls) el.className = cls;
+      before.parentNode.insertBefore(el, before);
+    }
+    return el;
+  }
+
   const els = {
-    form: $("search-form"), q: $("q"), hint: $("hint"), examples: $("examples"),
+    main: document.querySelector("main"), form: $("search-form"), q: $("q"),
+    suggest: $("suggest"), hint: $("hint"), examples: $("examples"),
     status: $("status"), filters: $("filters"), results: $("results"),
     more: $("more"), tagline: $("tagline"),
   };
-  const state = { q: "", model: "bm25", cat: "", shown: PAGE, results: [], unknown: [], ms: 0 };
-  let engine = null;
+  els.dym = ensure("dym", "dym", els.status);
+  els.compare = ensure("compare", "", els.more);
+  els.dym.hidden = true;
+  els.compare.hidden = true;
+
+  const state = { q: "", model: "bm25", cat: "", shown: PAGE, results: [],
+                  unknown: [], fix: null, auto: null, used: "", cmp: null, ms: 0 };
+  let engine = null, sugItems = [], sugIndex = -1;
 
   const esc = (s) => s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -68,15 +90,47 @@
     return state.model === "boolean" ? q.replace(/\b(AND|OR|NOT)\b/g, " ") : q;
   }
 
-  function runSearch() {
+  // runs the current model on q, stores the results, returns how many matched
+  function execute(q) {
+    if (state.model === "boolean") {
+      state.cmp = null;
+      state.results = engine.boolean(q).map((id) => [id, null]);
+      return state.results.length;
+    }
+    if (state.model === "compare") {
+      state.cmp = engine.compare(q, 5);
+      state.results = [];
+      return state.cmp.total;
+    }
+    state.cmp = null;
+    state.results = state.model === "bm25" ? engine.bm25(q) : engine.tfidf(q);
+    return state.results.length;
+  }
+
+  function runSearch(noAutoFix) {
     const q = state.q.trim();
-    state.shown = PAGE;
-    if (!q) { state.results = []; state.unknown = []; render(); return; }
+    state.shown = PAGE; state.cmp = null; state.fix = null; state.auto = null; state.used = q;
+    if (!q) { state.results = []; state.unknown = []; syncUrl(); render(); return; }
+
     const t0 = performance.now();
-    if (state.model === "boolean") state.results = engine.boolean(q).map((id) => [id, null]);
-    else state.results = state.model === "bm25" ? engine.bm25(q) : engine.tfidf(q);
+    const isBool = state.model === "boolean";
+    const count = execute(q);
+    let unknown = engine.analyze(queryForAnalysis(q)).unknown;
+    const fix = unknown.length ? engine.fixQuery(q, isBool) : null;
+
+    if (fix && !noAutoFix && count === 0) {
+      if (execute(fix.text) > 0) {            // corrected query finds results: use it
+        state.auto = { from: q, to: fix.text };
+        state.used = fix.text;
+        unknown = engine.analyze(queryForAnalysis(fix.text)).unknown;
+      } else {
+        execute(q);                           // correction found nothing either: restore
+      }
+    } else {
+      state.fix = fix;                        // some results exist: only suggest
+    }
+    state.unknown = unknown;
     state.ms = performance.now() - t0;
-    state.unknown = engine.analyze(queryForAnalysis(q)).unknown;
     syncUrl();
     render();
   }
@@ -102,16 +156,107 @@
     }
   }
 
+  function linkButton(label, onClick) {
+    const a = document.createElement("button");
+    a.type = "button"; a.className = "dym-link"; a.textContent = label;
+    a.addEventListener("click", onClick);
+    return a;
+  }
+
+  function renderNotice() {
+    els.dym.innerHTML = "";
+    els.dym.hidden = true;
+    if (state.auto) {
+      const { from, to } = state.auto;
+      els.dym.hidden = false;
+      els.dym.append("Showing results for ");
+      const b = document.createElement("b");
+      b.textContent = to;
+      els.dym.append(b, ". Search instead for ");
+      els.dym.append(linkButton(from, () => {
+        els.q.value = from; state.q = from; state.cat = ""; runSearch(true);
+      }));
+      els.dym.append(".");
+    } else if (state.fix) {
+      const text = state.fix.text;
+      els.dym.hidden = false;
+      els.dym.append("Did you mean: ");
+      els.dym.append(linkButton(text, () => {
+        els.q.value = text; state.q = text; state.cat = ""; runSearch();
+      }));
+      els.dym.append("?");
+    }
+  }
+
+  function renderCompare() {
+    const c = state.cmp;
+    let msg = c.total + (c.total === 1 ? " matching document" : " matching documents") +
+      " · " + state.ms.toFixed(1) + " ms";
+    if (state.unknown.length) msg += " · not in index: " + state.unknown.join(", ");
+    els.status.textContent = c.total ? msg : "No results" +
+      (state.unknown.length ? " (not in index: " + state.unknown.join(", ") + ")" : "") +
+      ". Try different words.";
+    if (!c.total) return;
+
+    const note = document.createElement("p");
+    note.className = "cmp-note";
+    note.textContent = "BM25 and TF-IDF share " + c.shared + " of their top 5 results. " +
+      "The number next to each result is its rank in the other model.";
+
+    const cols = [
+      { title: "BM25", sub: "ranked by score",
+        items: c.bm25.map(([id, s]) => [id, "score " + s.toFixed(2) + " · TF-IDF #" + (c.rankTfidf.get(id) || "–")]) },
+      { title: "TF-IDF", sub: "ranked by cosine similarity",
+        items: c.tfidf.map(([id, s]) => [id, "score " + s.toFixed(3) + " · BM25 #" + (c.rankBm25.get(id) || "–")]) },
+      { title: "Boolean", sub: c.boolean.length + " documents contain every word (unranked, showing " +
+        Math.min(5, c.boolean.length) + ")",
+        items: c.boolTop.map((id) => [id, "unranked"]) },
+    ];
+    const grid = document.createElement("div");
+    grid.className = "cmp-grid";
+    for (const col of cols) {
+      const sec = document.createElement("section");
+      sec.className = "cmp-col";
+      sec.innerHTML = "<h3>" + esc(col.title) + '</h3><p class="cmp-sub">' + esc(col.sub) + "</p>";
+      if (!col.items.length) {
+        const p = document.createElement("p");
+        p.className = "cmp-sub"; p.textContent = "No matches. Boolean needs every word to appear.";
+        sec.appendChild(p);
+      } else {
+        const ol = document.createElement("ol");
+        for (const [id, info] of col.items) {
+          const d = engine.docs[id];
+          const li = document.createElement("li");
+          li.innerHTML = '<a href="' + esc(d.u) + '" target="_blank" rel="noopener">' + esc(d.t) +
+            '</a><div class="meta"><span class="badge">' + esc(d.c) + "</span><span>" + esc(info) + "</span></div>";
+          ol.appendChild(li);
+        }
+        sec.appendChild(ol);
+      }
+      grid.appendChild(sec);
+    }
+    els.compare.hidden = false;
+    els.compare.appendChild(note);
+    els.compare.appendChild(grid);
+  }
+
   function render() {
     els.hint.textContent = HINTS[state.model];
+    els.main.classList.toggle("wide", state.model === "compare");
     renderExamples();
+    els.compare.innerHTML = ""; els.compare.hidden = true;
     const q = state.q.trim();
     if (!q) {
+      els.dym.innerHTML = ""; els.dym.hidden = true;
       els.status.textContent = ""; els.filters.innerHTML = "";
       els.results.innerHTML = ""; els.more.hidden = true; return;
     }
+    renderNotice();
+    if (state.model === "compare") {
+      els.filters.innerHTML = ""; els.results.innerHTML = ""; els.more.hidden = true;
+      renderCompare(); return;
+    }
 
-    // category counts over all matches
     const counts = new Map();
     for (const [id] of state.results) {
       const c = engine.docs[id].c;
@@ -121,7 +266,6 @@
     const filtered = state.cat
       ? state.results.filter(([id]) => engine.docs[id].c === state.cat) : state.results;
 
-    // status line
     let msg = filtered.length + (filtered.length === 1 ? " result" : " results");
     if (state.cat) msg += " in " + state.cat;
     msg += " · " + state.ms.toFixed(1) + " ms · " + (state.model === "boolean" ? "unranked" : "ranked");
@@ -130,7 +274,6 @@
       : "No results" + (state.unknown.length ? " (not in index: " + state.unknown.join(", ") + ")" : "") +
         ". Try different words" + (state.model === "boolean" ? " or OR instead of AND." : ".");
 
-    // filter chips
     els.filters.innerHTML = "";
     if (counts.size > 1) {
       const mk = (label, value, n) => {
@@ -145,8 +288,7 @@
       Array.from(counts).sort((a, b) => b[1] - a[1]).forEach(([c, n]) => mk(c, c, n));
     }
 
-    // results
-    const hl = new Set(engine.analyze(queryForAnalysis(q)).qtf.keys());
+    const hl = new Set(engine.analyze(queryForAnalysis(state.used || q)).qtf.keys());
     els.results.innerHTML = "";
     filtered.slice(0, state.shown).forEach(([id, score], i) => {
       const d = engine.docs[id];
@@ -162,9 +304,56 @@
     els.more.hidden = filtered.length <= state.shown;
   }
 
+  /* ---------- autocomplete ---------- */
+  const lastWord = (v) => { const m = v.match(/[A-Za-z0-9]+$/); return m ? m[0] : ""; };
+
+  function renderSuggest() {
+    if (!els.suggest) return;
+    els.suggest.innerHTML = "";
+    els.suggest.hidden = sugItems.length === 0;
+    const w = lastWord(els.q.value);
+    sugItems.forEach((s, i) => {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      if (i === sugIndex) li.className = "active";
+      li.innerHTML = "<b>" + esc(s.slice(0, w.length)) + "</b>" + esc(s.slice(w.length));
+      li.addEventListener("mousedown", (e) => { e.preventDefault(); applySuggestion(s); });
+      els.suggest.appendChild(li);
+    });
+  }
+
+  function updateSuggest() {
+    if (!engine) return;
+    const w = lastWord(els.q.value);
+    sugItems = w.length >= 2 ? engine.suggest(w, 6) : [];
+    sugIndex = -1;
+    renderSuggest();
+  }
+
+  function closeSuggest() { sugItems = []; sugIndex = -1; renderSuggest(); }
+
+  function applySuggestion(s) {
+    const v = els.q.value;
+    els.q.value = v.slice(0, v.length - lastWord(v).length) + s + " ";
+    closeSuggest();
+    els.q.focus();
+  }
+
+  els.q.addEventListener("input", updateSuggest);
+  els.q.addEventListener("blur", closeSuggest);
+  els.q.addEventListener("keydown", (e) => {
+    if (!sugItems.length) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); sugIndex = (sugIndex + 1) % sugItems.length; renderSuggest(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); sugIndex = (sugIndex - 1 + sugItems.length) % sugItems.length; renderSuggest(); }
+    else if (e.key === "Enter" && sugIndex >= 0) { e.preventDefault(); applySuggestion(sugItems[sugIndex]); }
+    else if (e.key === "Tab") { e.preventDefault(); applySuggestion(sugItems[Math.max(sugIndex, 0)]); }
+    else if (e.key === "Escape") { closeSuggest(); }
+  });
+
   /* ---------- events ---------- */
   els.form.addEventListener("submit", (e) => {
-    e.preventDefault(); state.q = els.q.value; state.cat = ""; runSearch();
+    e.preventDefault(); closeSuggest();
+    state.q = els.q.value; state.cat = ""; runSearch();
   });
   document.querySelectorAll('input[name="model"]').forEach((r) =>
     r.addEventListener("change", () => { state.model = currentModel(); state.cat = ""; runSearch(); }));
@@ -187,9 +376,10 @@
     els.tagline.textContent = engine.N.toLocaleString() + " documents · " +
       engine.terms.size.toLocaleString() + " indexed terms";
     const p = new URLSearchParams(location.search);
-    if (["bm25", "tfidf", "boolean"].includes(p.get("model"))) {
+    if (MODELS.includes(p.get("model"))) {
       state.model = p.get("model");
-      document.querySelector('input[value="' + state.model + '"]').checked = true;
+      const radio = document.querySelector('input[value="' + state.model + '"]');
+      if (radio) radio.checked = true;
     }
     state.q = p.get("q") || ""; state.cat = p.get("cat") || "";
     els.q.value = state.q;
