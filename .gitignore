@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Data (large files stay out of Git)
+data/raw/
+data/clean/
+data/index/
+spark-warehouse/
+metastore_db/
+
+# Secrets and Firebase
+serviceAccountKey.json
+.env
+.firebase/
+firebase-debug.log
+
+# OS / editor
+.DS_Store
+.vscode/
+node_modules/
